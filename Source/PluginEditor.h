@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "Rows.h"
 #include "Views.h"
+#include "EqDisplay.h"
 
 class PepelEQEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
@@ -25,6 +26,9 @@ private:
     PepelEQAudioProcessor& proc;
     pepel::HeaderView header;
     pepel::WeatherView weather;
+    pepel::EqDisplay display;
+    pepel::Row* pointRows[3] = { nullptr, nullptr, nullptr };
+    void applySelection(pepel::EqDisplay::Sel);
     std::vector<std::unique_ptr<pepel::Panel>> panels;
 
     juce::Image background, scanlines;

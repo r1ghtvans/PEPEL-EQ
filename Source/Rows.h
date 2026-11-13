@@ -28,6 +28,15 @@ public:
     std::function<juce::String()> btnText, valueText, nameText; // Button/Found
     std::function<float()> barLevel;                   // Found: 0..1
 
+    // перенацелить строку на другой параметр (панель выбранной точки)
+    void setTarget(juce::RangedAudioParameter* p, const juce::String& n, std::function<juce::String(float)> f)
+    {
+        param = p; name = n; fmt = std::move(f);
+        sNorm = -2.0f;
+        setMouseCursor(p ? juce::MouseCursor::NormalCursor : juce::MouseCursor::NormalCursor);
+        sync();
+    }
+
     // опрос состояния (вызывается таймером 15 Гц)
     void sync()
     {
@@ -174,6 +183,7 @@ public:
         auto* p = r.get();
         addAndMakeVisible(*p);
         rows.push_back(std::move(r));
+        resized();
         return p;
     }
     static int heightFor(int nRows) { return 48 + 30 * nRows; }

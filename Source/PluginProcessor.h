@@ -57,6 +57,11 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     Analyzer inAnalyzer, outAnalyzer;
+    // осциллограмма выхода (пик за 25 мс), для нижней плашки
+    static constexpr int kScope = 190;
+    std::array<std::atomic<float>, kScope> scope;
+    std::atomic<int> scopeHead { 0 };
+    std::atomic<float> dynGainOut[kDyn] = {};   // текущее усиление динамических точек (для кривой)
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -99,6 +104,8 @@ private:
     std::atomic<float> *pSubOn, *pSubF, *pDynQ, *pDynA, *pDynR, *pScOn, *pNDepth, *pOut;
 
     juce::AudioBuffer<float> scratch;
+    float scopeAcc = 0.0f;
+    int scopeCount = 0, scopeSlice = 1100;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PepelEQAudioProcessor)
 };

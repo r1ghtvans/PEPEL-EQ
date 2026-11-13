@@ -17,6 +17,7 @@ public:
     static constexpr int K = N / 2;           // число бинов
     static constexpr int numBands = 48;
     static constexpr int maxFound = 4;
+    static constexpr int numSpec = 160;   // точки спектра 20 Гц .. 20 кГц (лог)
 
     Analyzer() : fft(fftOrder)
     {
@@ -25,6 +26,7 @@ public:
         for (auto& b : bands) b.store(0.0f);
         for (auto& f : foundFreq) f.store(0.0f);
         for (auto& f : foundProm) f.store(0.0f);
+        for (auto& v : spec) v.store(-120.0f);
     }
 
     void prepare(double sampleRate)
@@ -42,6 +44,15 @@ public:
             double f1 = 30.0 * std::pow(16000.0 / 30.0, (double) (b + 1) / numBands);
             bandLo[b] = juce::jlimit(1, K - 1, (int) std::floor(f0 * N / sr));
             bandHi[b] = juce::jlimit(bandLo[b], K - 1, (int) std::floor(f1 * N / sr));
+        }
+        for (int i = 0; i < numSpec; ++i)
+        {
+            const double f  = 20.0 * std::pow(1000.0, (double) i / (numSpec - 1));
+            const double fL = 20.0 * std::pow(1000.0, ((double) i - 0.5) / (numSpec - 1));
+            const double fH = 20.0 * std::pow(1000.0, ((double) i + 0.5) / (numSpec - 1));
+            specPos[i] = (float) (f * N / sr);
+            specLo[i] = juce::jlimit(1, K - 2, (int) std::floor(fL * N / sr));
+            specHi[i] = juce::jlimit(specLo[i], K - 2, (int) std::floor(fH * N / sr));
         }
         kHarshLo = juce::jlimit(1, K - 1, (int) (2000.0 * N / sr));
         kHarshHi = juce::jlimit(1, K - 1, (int) (9000.0 * N / sr));
@@ -67,6 +78,7 @@ public:
     std::array<std::atomic<float>, maxFound> foundFreq, foundProm;
     std::atomic<int> foundCount { 0 };
     std::atomic<float> searchSeconds { 0.0f };
+    std::array<std::atomic<float>, numSpec> spec;   // дБ (отн. синуса 0 дБ)
 
     // ----- управление поиском -----
     std::atomic<bool> searching { false };
@@ -110,6 +122,25 @@ private:
             for (int k = bandLo[b]; k <= bandHi[b]; ++k) mx = juce::jmax(mx, pw[(size_t) k]);
             float db = 10.0f * std::log10((float) mx + 1.0e-12f);
             bands[(size_t) b].store(juce::jlimit(0.0f, 1.0f, (db + 70.0f) / 50.0f));
+        }
+
+        // спектр для экрана
+        for (int i = 0; i < numSpec; ++i)
+        {
+            double m;
+            if (specHi[i] > specLo[i])
+            {
+                m = 0.0;
+                for (int k = specLo[i]; k <= specHi[i]; ++k) m = juce::jmax(m, pw[(size_t) k]);
+            }
+            else
+            {
+                const float p = specPos[i];
+                const int k = juce::jlimit(1, K - 2, (int) p);
+                const double fr = juce::jlimit(0.0f, 1.0f, p - (float) k);
+                m = pw[(size_t) k] * (1.0 - fr) + pw[(size_t) k + 1] * fr;
+            }
+            spec[(size_t) i].store(10.0f * std::log10((float) m + 1.0e-12f));
         }
 
         // средняя мощность (дБ отн. полной шкалы): msq = 5.33 * tot / N^2
@@ -236,4 +267,6 @@ private:
     float dirtSm = 0.0f;
     int bandLo[numBands] = {}, bandHi[numBands] = {};
     int kHarshLo = 1, kHarshHi = 1;
+    float specPos[numSpec] = {};
+    int specLo[numSpec] = {}, specHi[numSpec] = {};
 };

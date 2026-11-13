@@ -130,6 +130,7 @@ PepelEQAudioProcessor::PepelEQAudioProcessor()
     pNDepth = apvts.getRawParameterValue(ids::nDepth);
     pOut = apvts.getRawParameterValue(ids::outGain);
 
+    for (auto& s : scope) s.store(0.0f);
     outAnalyzer.computeDirt = true;
     inAnalyzer.doSearch = true;
     for (int i = 0; i < kGraphic; ++i) lastGraphic[i] = 1000.f;
@@ -154,6 +155,8 @@ bool PepelEQAudioProcessor::isBusesLayoutSupported(const BusesLayout& l) const
 void PepelEQAudioProcessor::prepareToPlay(double sr, int)
 {
     sampleRate = sr;
+    scopeSlice = juce::jmax(64, (int) (sr * 0.025));
+    scopeAcc = 0.0f; scopeCount = 0;
     inAnalyzer.prepare(sr);
     outAnalyzer.prepare(sr);
     for (auto& b : sub) b.reset();
@@ -307,6 +310,20 @@ void PepelEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         }
     }
     outGainSmoothed = outTarget;
+    for (int i = 0; i < n; ++i)
+    {
+        float v = std::abs(ch[0][i]);
+        if (nch > 1) v = juce::jmax(v, std::abs(ch[1][i]));
+        scopeAcc = juce::jmax(scopeAcc, v);
+        if (++scopeCount >= scopeSlice)
+        {
+            const int hd = scopeHead.load(std::memory_order_relaxed);
+            scope[(size_t) hd].store(scopeAcc);
+            scopeHead.store((hd + 1) % kScope, std::memory_order_release);
+            scopeAcc = 0.0f; scopeCount = 0;
+        }
+    }
+    for (int d = 0; d < kDyn; ++d) dynGainOut[d].store(dynGain[d]);
 
     const float* chOut[2] = { ch[0], ch[1] };
     outAnalyzer.push(chOut, nch, n);

@@ -57,13 +57,11 @@ public:
     void paint(juce::Graphics& g) override
     {
         const int w = getWidth();
-        // небо: полосы по 8 px
         for (int y = 0; y < 112; y += 8)
         {
             g.setColour(lerpC(hex(0x00003E), hex(0x2A2490), (float) y / 104.0f));
             g.fillRect(0, y, w, 8);
         }
-        // звёзды
         for (auto& s : stars)
         {
             const bool on = ((frame + s.phase) % s.period) < (s.period * 7 / 10);
@@ -80,10 +78,8 @@ public:
                 g.setColour(col::moon); g.fillRect(s.x + 2, s.y + 2, 1, 1);
             }
         }
-        // луна
         drawSprite(g, sprites::crescent, sprites::crescentW, sprites::crescentH, w - 140 + 3, 20 + 3, 4, col::ink.withAlpha(0.6f));
         drawSprite(g, sprites::crescent, sprites::crescentW, sprites::crescentH, w - 140, 20, 4, col::moon);
-        // облака
         for (auto& c : clouds)
         {
             const char* const* rows = c.size == 0 ? sprites::cloudS : (c.size == 1 ? sprites::cloudM : sprites::cloudL);
@@ -91,7 +87,6 @@ public:
             const int ch = c.size == 0 ? sprites::cloudSH : (c.size == 1 ? sprites::cloudMH : sprites::cloudLH);
             drawSprite(g, rows, cw, ch, (int) c.x, c.y, 4, c.colour);
         }
-        // комета
         if (comet.active)
         {
             for (int i = 8; i >= 1; --i)
@@ -101,14 +96,12 @@ public:
             }
             g.setColour(col::moon); g.fillRect((int) comet.x, (int) comet.y, 4, 4);
         }
-        // иероглифы
         const int kx = w / 2 - 56, ky = 32;
         drawSprite(g, sprites::kanjiHai, 16, 16, kx + 3, ky + 3, 3, col::ink.withAlpha(0.8f));
         drawSprite(g, sprites::kanjiHai, 16, 16, kx, ky, 3, col::moon);
         drawSprite(g, sprites::kanjiAi, 16, 16, kx + 64 + 3, ky + 3, 3, col::ink.withAlpha(0.8f));
         drawSprite(g, sprites::kanjiAi, 16, 16, kx + 64, ky, 3, col::blood);
 
-        // заголовок с хроматической аберрацией
         const int off = glitch ? 4 : 2;
         const juce::Rectangle<int> tr(30, 14, 420, 36);
         g.setFont(Fonts::get().press(30.0f));
@@ -117,7 +110,6 @@ public:
         g.setColour(col::red.withAlpha(0.85f));  g.drawText("PEPEL EQ", tr.translated(off, 0), juce::Justification::centredLeft, false);
         g.setColour(col::moon);                  g.drawText("PEPEL EQ", tr, juce::Justification::centredLeft, false);
 
-        // выбор пресета
         const auto pr = presetRect();
         g.setColour(col::ink.withAlpha(0.55f)); fillStepped(g, pr.translated(3, 3), 6);
         drawPanelFrame(g, pr, col::frameViolet);
@@ -129,8 +121,7 @@ public:
         g.drawText(presetText ? presetText() : juce::String(), pr.withTrimmedLeft(34).withTrimmedRight(34),
                    juce::Justification::centred, false);
 
-        // нижние линии
-        g.setColour(col::blood); g.fillRect(0, 112 - 3 + 0, w, 3);
+        g.setColour(col::blood); g.fillRect(0, 109, w, 3);
         g.setColour(col::ink);   g.fillRect(0, 112, w, 3);
         g.setColour(col::ink);   g.fillRect(0, 115, w, 3);
     }
@@ -154,18 +145,13 @@ private:
     int frame = 0;
 };
 
-// ============================ ПОГОДА-ВИЗУАЛИЗАТОР ============================
+// ============================ ПОГОДА + ОСЦИЛЛОГРАММА ============================
 class WeatherView : public juce::Component
 {
 public:
     explicit WeatherView(PepelEQAudioProcessor& p) : proc(p)
     {
         juce::Random r(777);
-        for (int i = 0; i < nCols; ++i)
-        {
-            baseH[i] = 2 + r.nextInt(5) + (r.nextInt(9) == 0 ? 3 : 0);
-            lvl[i] = 0.0f;
-        }
         for (int i = 0; i < 7; ++i)
         {
             Cloud c; c.x = r.nextFloat() * 1150.0f; c.y = 4 + r.nextInt(8) * 4 + (i % 2) * 6;
@@ -199,12 +185,6 @@ public:
                 x += (rnd.nextBool() ? 1.0f : -1.0f) * (4.0f + rnd.nextFloat() * 8.0f);
             }
         }
-        for (int i = 0; i < nCols; ++i)
-        {
-            const int b = juce::jlimit(0, Analyzer::numBands - 1, i * Analyzer::numBands / nCols);
-            const float t = proc.inAnalyzer.bands[(size_t) b].load();
-            lvl[i] += (t - lvl[i]) * (t > lvl[i] ? 0.7f : 0.3f);
-        }
         repaint();
     }
 
@@ -221,7 +201,7 @@ public:
     }
 
 private:
-    static constexpr int nCols = 94;
+    static constexpr int nCols = 189;
     static constexpr int U = 4;
     struct Cloud { float x; int y; int size; float speed; };
     struct Drop { float x, y, v; };
@@ -238,9 +218,11 @@ private:
 
         const juce::Colour top = keyframes(kp, topC, d), hor = keyframes(kp, horC, d), cc = keyframes(kp, cloudC, d);
         for (int y = 0; y < h; y += U)
-            { g.setColour(lerpC(top, hor, juce::jmin(1.0f, (float) y / (float) horizon))); g.fillRect(0, y, w, U); }
+        {
+            g.setColour(lerpC(top, hor, juce::jmin(1.0f, (float) y / (float) horizon)));
+            g.fillRect(0, y, w, U);
+        }
 
-        // солнце
         if (d < 0.65f)
         {
             const float t = juce::jlimit(0.0f, 1.0f, d / 0.5f);
@@ -249,7 +231,6 @@ private:
             pixelCircle(g, 150, cy, 8, sc.withAlpha(0.22f));
             pixelCircle(g, 150, cy, 5, sc);
         }
-        // кровавая луна
         if (d > 0.8f)
         {
             const float a = juce::jlimit(0.0f, 1.0f, (d - 0.8f) / 0.15f);
@@ -258,7 +239,6 @@ private:
             g.setColour(col::maroon.withAlpha(a));
             g.fillRect(w * 4 / 5 - 8, 18, 8, 4); g.fillRect(w * 4 / 5 + 4, 28, 8, 8); g.fillRect(w * 4 / 5 - 12, 32, 4, 4);
         }
-        // облака
         const int visible = 3 + juce::roundToInt(d * 4.0f);
         for (int i = 0; i < (int) clouds.size() && i < visible; ++i)
         {
@@ -268,7 +248,6 @@ private:
             const int ch = c.size == 0 ? sprites::cloudSH : (c.size == 1 ? sprites::cloudMH : sprites::cloudLH);
             drawSprite(g, rows, cw, ch, (int) c.x, c.y, U, cc);
         }
-        // дождь
         if (d > 0.55f)
         {
             const int n = juce::roundToInt((d - 0.55f) / 0.45f * (float) rain.size());
@@ -276,7 +255,6 @@ private:
             for (int i = 0; i < n && i < (int) rain.size(); ++i)
                 g.fillRect((int) rain[(size_t) i].x, (int) rain[(size_t) i].y, 2, 6);
         }
-        // гроза
         if (flash > 0)
         {
             g.setColour(juce::Colours::white.withAlpha(0.35f));
@@ -290,20 +268,23 @@ private:
                 g.fillRect((int) juce::jmin(bolt[i].x, bolt[i + 1].x), (int) bolt[i].y + 8, (int) std::abs(bolt[i + 1].x - bolt[i].x) + 4, 4);
             }
         }
-        // земля и город-эквалайзер
-        g.setColour(col::ink);
-        g.fillRect(0, h - 6, w, 6);
-        const int colW = 12;
+
+        // осциллограмма выхода (динамика звуковой волны) вместо чёрных столбиков
+        const int head = proc.scopeHead.load(std::memory_order_acquire);
+        const int centre = h - 30;
+        const juce::Colour tip = lerpC(col::glow, col::coral, d);
         for (int i = 0; i < nCols; ++i)
         {
-            const int blocks = baseH[i] + juce::roundToInt(lvl[i] * 9.0f);
-            const int hh = blocks * U;
+            const float pk = proc.scope[(size_t) ((head + i) % PepelEQAudioProcessor::kScope)].load();
+            const float db = 20.0f * std::log10(juce::jmax(pk, 1.0e-4f));
+            const float l = juce::jlimit(0.0f, 1.0f, (db + 54.0f) / 54.0f);
+            const int half = 2 + ((int) (l * 26.0f) / 2) * 2;
             g.setColour(col::ink);
-            g.fillRect(i * colW, h - 6 - hh, colW - 1, hh + 1);
-            g.setColour(lerpC(col::mist, col::coral, d).withAlpha(0.7f));
-            g.fillRect(i * colW, h - 6 - hh, colW - 1, 2);
+            g.fillRect(i * 6, centre - half, 5, half * 2);
+            g.setColour(tip.withAlpha(0.85f));
+            g.fillRect(i * 6, centre - half, 5, 2);
+            g.fillRect(i * 6, centre + half - 2, 5, 2);
         }
-        juce::ignoreUnused(horizon);
     }
 
     static void pixelCircle(juce::Graphics& g, int cx, int cy, int r, juce::Colour c)
@@ -318,8 +299,6 @@ private:
     PepelEQAudioProcessor& proc;
     float dirt = 0.0f;
     int flash = 0;
-    int baseH[nCols];
-    float lvl[nCols];
     std::vector<Cloud> clouds;
     std::vector<Drop> rain;
     std::vector<juce::Point<float>> bolt;

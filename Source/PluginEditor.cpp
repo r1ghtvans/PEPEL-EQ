@@ -2,6 +2,8 @@
 
 using namespace pepel;
 
+static constexpr int kW = 1190, kH = 920;
+
 namespace
 {
 juce::String fmtDb(float v)   { return (v >= 0.05f ? "+" : "") + juce::String(v, 1) + "dB"; }
@@ -12,18 +14,18 @@ juce::String fmtMs(float v)   { return juce::String(juce::roundToInt(v)) + "ms";
 }
 
 PepelEQEditor::PepelEQEditor(PepelEQAudioProcessor& p)
-    : juce::AudioProcessorEditor(&p), proc(p), weather(p)
+    : juce::AudioProcessorEditor(&p), proc(p), weather(p), display(p)
 {
     setOpaque(true);
-    setSize(1190, 864);
+    setSize(kW, kH);
     setResizable(false, false);
 
-    background = makeBackground(1190, 864);
-    scanlines = juce::Image(juce::Image::ARGB, 1190, 864, true);
+    background = makeBackground(kW, kH);
+    scanlines = juce::Image(juce::Image::ARGB, kW, kH, true);
     {
         juce::Graphics g(scanlines);
         g.setColour(col::ink.withAlpha(0.16f));
-        for (int y = 0; y < 864; y += 3) g.fillRect(0, y, 1190, 1);
+        for (int y = 0; y < kH; y += 3) g.fillRect(0, y, kW, 1);
     }
 
     addAndMakeVisible(header);
@@ -39,36 +41,25 @@ PepelEQEditor::PepelEQEditor(PepelEQAudioProcessor& p)
     const int cx[3] = { 20, 410, 800 };
     const int top = HeaderView::H + 14;
 
+    // ---------- экран (как в Pro-Q) ----------
+    addAndMakeVisible(display);
+    display.setBounds(20, top, 1150, 280);
+    display.onSelect = [this](EqDisplay::Sel s) { applySelection(s); };
+    const int py = top + 280 + 14;   // панели ниже экрана
+
     // ---------- колонка 1 ----------
-    auto* pg = addPanel(RU("ГРАФИЧЕСКИЙ"), col::frameBlue, cx[0], top, kGraphic);
-    const char* names[kGraphic] = { "31", "63", "125", "250", "500", "1K", "2K", "4K", "8K", "16K" };
-    for (int i = 0; i < kGraphic; ++i) addSlider(pg, names[i], ids::gain(i), fmtDb);
-
-    auto* ps = addPanel(RU("САБ-СРЕЗ"), col::frameBlood, cx[0], top + Panel::heightFor(kGraphic) + 14, 2);
-    addToggle(ps, RU("СРЕЗ"), ids::subOn, RU("ВКЛ"), RU("ВЫКЛ"));
-    addSlider(ps, RU("ЧАСТОТА"), ids::subFreq, fmtFreq);
-
-    auto* po = addPanel(RU("ВЫХОД"), col::frameViolet, cx[0], top + Panel::heightFor(kGraphic) + 14 + Panel::heightFor(2) + 14, 1);
-    addSlider(po, RU("УРОВЕНЬ"), ids::outGain, fmtDb);
-
-    // ---------- колонка 2: динамические точки ----------
-    const juce::Colour cyc[4] = { col::frameCoral, col::frameBlue, col::frameBlood, col::frameViolet };
-    for (int i = 0; i < kDyn; ++i)
-    {
-        auto* pd = addPanel(RU("ДИНАМИКА ") + juce::String(i + 1), cyc[i], cx[1], top + i * (Panel::heightFor(3) + 14), 3);
-        addSlider(pd, RU("ЧАСТОТА"), ids::dFreq(i), fmtFreq);
-        addSlider(pd, RU("ПОРОГ"), ids::dThr(i), fmtThr);
-        addSlider(pd, RU("ЭФФЕКТ"), ids::dRng(i), fmtDb);
-    }
-
-    // ---------- колонка 3 ----------
-    auto* pgl = addPanel(RU("ДЕТЕКТОР"), col::frameViolet, cx[2], top, 4);
+    auto* pgl = addPanel(RU("ДЕТЕКТОР"), col::frameViolet, cx[0], py, 4);
     addToggle(pgl, RU("ВХОД"), ids::scOn, RU("СИДЧЕЙН"), RU("СИГНАЛ"));
     addSlider(pgl, RU("ДОБРОТН"), ids::dynQ, fmtQ);
     addSlider(pgl, RU("АТАКА"), ids::dynAtk, fmtMs);
     addSlider(pgl, RU("РЕЛИЗ"), ids::dynRel, fmtMs);
 
-    auto* pf = addPanel(RU("ПОИСК ШУМА"), col::frameCoral, cx[2], top + Panel::heightFor(4) + 14, 5);
+    auto* ps = addPanel(RU("САБ-СРЕЗ"), col::frameBlood, cx[0], py + Panel::heightFor(4) + 14, 2);
+    addToggle(ps, RU("СРЕЗ"), ids::subOn, RU("ВКЛ"), RU("ВЫКЛ"));
+    addSlider(ps, RU("ЧАСТОТА"), ids::subFreq, fmtFreq);
+
+    // ---------- колонка 2 ----------
+    auto* pf = addPanel(RU("ПОИСК ШУМА"), col::frameCoral, cx[1], py, 5);
     {
         auto r = std::make_unique<Row>(Row::Kind::Button, RU("ШУМ"));
         r->isOn = [this] { return proc.inAnalyzer.searching.load(); };
@@ -103,13 +94,25 @@ PepelEQEditor::PepelEQEditor(PepelEQAudioProcessor& p)
         pf->add(std::move(r));
     }
 
-    auto* pn = addPanel(RU("РЕЖЕКТОРЫ"), col::frameBlood, cx[2], top + Panel::heightFor(4) + 14 + Panel::heightFor(5) + 14, 5);
+    auto* pt = addPanel(RU("ТОЧКА"), col::frameBlue, cx[1], py + Panel::heightFor(5) + 14, 3);
+    for (int i = 0; i < 3; ++i)
+    {
+        auto r = std::make_unique<Row>(Row::Kind::Slider, juce::String("---"));
+        pointRows[i] = pt->add(std::move(r));
+    }
+
+    // ---------- колонка 3 ----------
+    auto* pn = addPanel(RU("РЕЖЕКТОРЫ"), col::frameBlood, cx[2], py, 5);
     for (int i = 0; i < kNotch; ++i)
         addSlider(pn, RU("ФИЛЬТР ") + juce::String(i + 1), ids::nFreq(i), fmtFreq, ids::nOn(i));
     addSlider(pn, RU("ГЛУБИНА"), ids::nDepth, [](float v) { return juce::String(juce::roundToInt(v)) + "dB"; });
 
+    auto* po = addPanel(RU("ВЫХОД"), col::frameViolet, cx[2], py + Panel::heightFor(5) + 14, 1);
+    addSlider(po, RU("УРОВЕНЬ"), ids::outGain, fmtDb);
+
     addAndMakeVisible(weather);
-    weather.setBounds(20, 864 - 96 - 12, 1150, 96);
+    weather.setBounds(20, kH - 96 - 30, 1150, 96);
+    applySelection({ EqDisplay::Type::Graphic, 5 });
 
     for (auto& pnl : panels) pnl->syncAll();
     startTimerHz(15);
@@ -161,6 +164,17 @@ void PepelEQEditor::paint(juce::Graphics& g)
     g.drawImageAt(background, 0, 0);
     for (auto& p : panels) drawPanelShadow(g, p->getBounds());
     drawPanelShadow(g, weather.getBounds());
+    drawPanelShadow(g, display.getBounds());
+
+    // подпись внизу справа
+    const juce::Rectangle<int> sig(kW - 20 - 300, kH - 28, 300, 22);
+    g.setFont(Fonts::get().press(13.0f));
+    g.setColour(col::ink.withAlpha(0.8f));
+    g.drawText(RU("by ПЕПЕL"), sig.translated(2, 2), juce::Justification::centredRight, false);
+    g.setColour(col::cyan.withAlpha(0.7f));
+    g.drawText(RU("by ПЕПЕL"), sig.translated(-1, 0), juce::Justification::centredRight, false);
+    g.setColour(col::peach);
+    g.drawText(RU("by ПЕПЕL"), sig, juce::Justification::centredRight, false);
 }
 
 void PepelEQEditor::paintOverChildren(juce::Graphics& g)
@@ -172,7 +186,7 @@ void PepelEQEditor::paintOverChildren(juce::Graphics& g)
     for (int i = 0; i < 24; ++i)
     {
         g.setColour((i & 1 ? juce::Colours::white : col::ink).withAlpha(0.25f));
-        g.fillRect(rng.nextInt(1190), rng.nextInt(864), 2, 1);
+        g.fillRect(rng.nextInt(kW), rng.nextInt(kH), 2, 1);
     }
 
     // редкие сбои
@@ -182,7 +196,7 @@ void PepelEQEditor::paintOverChildren(juce::Graphics& g)
         g.fillRect(glitchBar);
         for (int i = 0; i < 4; ++i)
         {
-            const int w = 60 + rng.nextInt(240), x = rng.nextInt(1190 - w);
+            const int w = 60 + rng.nextInt(240), x = rng.nextInt(kW - w);
             const int y = glitchBar.getY() + rng.nextInt(juce::jmax(1, glitchBar.getHeight() - 3));
             g.setColour((i & 1 ? col::cyan : col::pink).withAlpha(0.5f));
             g.fillRect(x, y, w, 3);
@@ -197,11 +211,32 @@ void PepelEQEditor::timerCallback()
     {
         glitchFrames = 2 + rng.nextInt(3);
         nextGlitch = 45 + rng.nextInt(30);
-        glitchBar = { 0, rng.nextInt(840), 1190, 10 + rng.nextInt(14) };
+        glitchBar = { 0, rng.nextInt(kH - 24), kW, 10 + rng.nextInt(14) };
     }
     header.glitch = glitchFrames > 0;
     header.tick();
     weather.tick();
+    display.tick();
     for (auto& p : panels) p->syncAll();
     repaint();
+}
+
+void PepelEQEditor::applySelection(EqDisplay::Sel s)
+{
+    using T = EqDisplay::Type;
+    auto P = [this](const juce::String& id) { return proc.apvts.getParameter(id); };
+    juce::RangedAudioParameter* p0 = nullptr; juce::RangedAudioParameter* p1 = nullptr; juce::RangedAudioParameter* p2 = nullptr;
+    juce::String n1 = RU("УРОВЕНЬ"); std::function<juce::String(float)> f1 = fmtDb;
+    switch (s.type)
+    {
+        case T::Graphic: p1 = P(ids::gain(s.idx)); break;
+        case T::Dyn:     p0 = P(ids::dFreq(s.idx)); p1 = P(ids::dRng(s.idx)); p2 = P(ids::dThr(s.idx)); n1 = RU("ЭФФЕКТ"); break;
+        case T::Notch:   p0 = P(ids::nFreq(s.idx)); p1 = P(ids::nDepth); n1 = RU("ГЛУБИНА");
+                         f1 = [](float v) { return juce::String(juce::roundToInt(v)) + "dB"; }; break;
+        case T::Sub:     p0 = P(ids::subFreq); break;
+        default: break;
+    }
+    pointRows[0]->setTarget(p0, RU("ЧАСТОТА"), fmtFreq);
+    pointRows[1]->setTarget(p1, n1, f1);
+    pointRows[2]->setTarget(p2, RU("ПОРОГ"), fmtThr);
 }
