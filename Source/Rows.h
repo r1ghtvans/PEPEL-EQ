@@ -204,13 +204,21 @@ public:
         g.setColour(col::text);
         g.setFont(Fonts::get().press(13.0f));
         g.drawText(title, juce::Rectangle<int>(36, 8, getWidth() - 44, 26), juce::Justification::centredLeft, false);
+        g.setFont(Fonts::get().press(8.0f));
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            g.setColour(i % 2 == 0 ? col::text : col::glow);
+            g.drawText(lines[i], juce::Rectangle<int>(14, 46 + (int) i * 22, getWidth() - 28, 16), juce::Justification::centredLeft, false);
+        }
     }
 
+    void setLines(std::vector<juce::String> l) { lines = std::move(l); repaint(); }
     void syncAll() { for (auto& r : rows) r->sync(); }
 
 private:
     juce::String title;
     juce::Colour frame;
     std::vector<std::unique_ptr<Row>> rows;
+    std::vector<juce::String> lines;
 };
 } // namespace pepel
