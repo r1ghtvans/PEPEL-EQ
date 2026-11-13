@@ -47,72 +47,71 @@ PepelEQEditor::PepelEQEditor(PepelEQAudioProcessor& p)
     display.onSelect = [this](EqDisplay::Sel s) { applySelection(s); };
     const int py = top + 280 + 14;   // панели ниже экрана
 
-    // ---------- колонка 1 ----------
-    auto* pgl = addPanel(RU("ДЕТЕКТОР"), col::frameViolet, cx[0], py, 4);
-    addToggle(pgl, RU("ВХОД"), ids::scOn, RU("СИДЧЕЙН"), RU("СИГНАЛ"));
-    addSlider(pgl, RU("ДОБРОТН"), ids::dynQ, fmtQ);
-    addSlider(pgl, RU("АТАКА"), ids::dynAtk, fmtMs);
-    addSlider(pgl, RU("РЕЛИЗ"), ids::dynRel, fmtMs);
-
-    auto* ps = addPanel(RU("САБ-СРЕЗ"), col::frameBlood, cx[0], py + Panel::heightFor(4) + 14, 2);
-    addToggle(ps, RU("СРЕЗ"), ids::subOn, RU("ВКЛ"), RU("ВЫКЛ"));
-    addSlider(ps, RU("ЧАСТОТА"), ids::subFreq, fmtFreq);
-
-    // ---------- колонка 2 ----------
-    auto* pf = addPanel(RU("ПОИСК ШУМА"), col::frameCoral, cx[1], py, 5);
+    // ---------- колонка 1: сайдчейн и выход ----------
+    auto* psc = addPanel(RU("СИДЧЕЙН"), col::frameViolet, cx[0], py, 4);
+    addToggle(psc, RU("ВХОД"), ids::scOn, RU("СИДЧЕЙН"), RU("СИГНАЛ"));
     {
-        auto r = std::make_unique<Row>(Row::Kind::Button, RU("ШУМ"));
-        r->isOn = [this] { return proc.inAnalyzer.searching.load(); };
-        r->btnText = [this] { return proc.inAnalyzer.searching.load() ? RU("СТОП") : RU("ИСКАТЬ"); };
+        auto r = std::make_unique<Row>(Row::Kind::Found, RU("SC ВХОД"));
         r->valueText = [this] {
-            return proc.inAnalyzer.searching.load() ? juce::String(proc.inAnalyzer.searchSeconds.load(), 0) + "s" : juce::String();
+            if (!proc.scBusOn.load()) return RU("НЕТ");
+            return proc.scLevel.load() > 0.003f ? RU("ЕСТЬ") : RU("ТИХО");
         };
-        r->onClick = [this] {
-            auto& a = proc.inAnalyzer;
-            if (a.searching.load()) a.searching.store(false);
-            else { a.clearRequest.store(true); a.searching.store(true); }
+        r->barLevel = [this] {
+            const float db = 20.0f * std::log10(juce::jmax(proc.scLevel.load(), 1.0e-4f));
+            return juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 60.0f);
         };
-        pf->add(std::move(r));
+        psc->add(std::move(r));
     }
-    for (int i = 0; i < Analyzer::maxFound; ++i)
-    {
-        auto r = std::make_unique<Row>(Row::Kind::Found, juce::String());
-        r->nameText = [this, i] {
-            return i < proc.inAnalyzer.foundCount.load() ? RU("УБРАТЬ ") + juce::String(i + 1) : juce::String("---");
-        };
-        r->valueText = [this, i] {
-            return i < proc.inAnalyzer.foundCount.load() ? fmtFreq(proc.inAnalyzer.foundFreq[(size_t) i].load()) : juce::String();
-        };
-        r->barLevel = [this, i] {
-            return i < proc.inAnalyzer.foundCount.load()
-                       ? juce::jlimit(0.05f, 1.0f, proc.inAnalyzer.foundProm[(size_t) i].load() / 30.0f) : 0.0f;
-        };
-        r->onClick = [this, i] {
-            if (i < proc.inAnalyzer.foundCount.load())
-                proc.addNotchAt(proc.inAnalyzer.foundFreq[(size_t) i].load());
-        };
-        pf->add(std::move(r));
-    }
+    addSlider(psc, RU("АТАКА"), ids::dynAtk, fmtMs);
+    addSlider(psc, RU("РЕЛИЗ"), ids::dynRel, fmtMs);
 
-    auto* pt = addPanel(RU("ТОЧКА"), col::frameBlue, cx[1], py + Panel::heightFor(5) + 14, 3);
-    for (int i = 0; i < 3; ++i)
-    {
-        auto r = std::make_unique<Row>(Row::Kind::Slider, juce::String("---"));
-        pointRows[i] = pt->add(std::move(r));
-    }
-
-    // ---------- колонка 3 ----------
-    auto* pn = addPanel(RU("РЕЖЕКТОРЫ"), col::frameBlood, cx[2], py, 5);
-    for (int i = 0; i < kNotch; ++i)
-        addSlider(pn, RU("ФИЛЬТР ") + juce::String(i + 1), ids::nFreq(i), fmtFreq, ids::nOn(i));
-    addSlider(pn, RU("ГЛУБИНА"), ids::nDepth, [](float v) { return juce::String(juce::roundToInt(v)) + "dB"; });
-
-    auto* po = addPanel(RU("ВЫХОД"), col::frameViolet, cx[2], py + Panel::heightFor(5) + 14, 1);
+    auto* po = addPanel(RU("ВЫХОД"), col::frameCoral, cx[0], py + Panel::heightFor(4) + 14, 1);
     addSlider(po, RU("УРОВЕНЬ"), ids::outGain, fmtDb);
+
+    // ---------- колонка 2: выбранная точка ----------
+    auto* pt = addPanel(RU("ТОЧКА"), col::frameBlue, cx[1], py, 8);
+    for (int i = 0; i < 4; ++i)
+        pointRows[i] = pt->add(std::make_unique<Row>(Row::Kind::Slider, juce::String("---")));
+
+    auto selPoint = [this] { return display.selected.type == EqDisplay::Type::Point; };
+    auto selBool = [this, selPoint](const char* kind) -> juce::RangedAudioParameter* {
+        if (!selPoint()) return nullptr;
+        const int i = display.selected.idx;
+        return proc.apvts.getParameter(juce::String(kind) == "notch" ? ids::pNotch(i) : ids::pDyn(i));
+    };
+    addButton(pt, RU("ТИП"),
+        [selBool] { auto* p = selBool("notch"); return p && p->getValue() > 0.5f; },
+        [selBool] { auto* p = selBool("notch"); return (p && p->getValue() > 0.5f) ? RU("РЕЖЕКТОР") : RU("КОЛОКОЛ"); },
+        [this, selBool] { auto* p = selBool("notch"); if (p) display.command(p->getValue() > 0.5f ? 1 : 2); });
+    addButton(pt, RU("ДИНАМИКА"),
+        [selBool] { auto* p = selBool("dyn"); return p && p->getValue() > 0.5f; },
+        [selBool] { auto* p = selBool("dyn"); return (p && p->getValue() > 0.5f) ? RU("ВКЛ") : RU("ВЫКЛ"); },
+        [this, selBool] { if (selBool("dyn")) display.command(3); });
+    addButton(pt, RU("ПРОСЛУШКА"),
+        [this] { const int c = EqDisplay::listenCodeOf(display.selected); return c >= 0 && proc.listen.load() == c; },
+        [this] { const int c = EqDisplay::listenCodeOf(display.selected); return (c >= 0 && proc.listen.load() == c) ? RU("СТОП") : RU("СЛУШАТЬ"); },
+        [this] { if (EqDisplay::listenCodeOf(display.selected) >= 0) display.command(4); });
+    addButton(pt, RU("ТОЧКА"),
+        [] { return false; },
+        [] { return RU("УДАЛИТЬ"); },
+        [this] { if (display.selected.type != EqDisplay::Type::None) display.command(5); });
+
+    // ---------- колонка 3: срезы и подсказки ----------
+    auto* pc = addPanel(RU("СРЕЗЫ"), col::frameBlood, cx[2], py, 3);
+    addSlider(pc, RU("НИЗ"), ids::hpF, fmtFreq, ids::hpOn);
+    addSlider(pc, RU("ВЕРХ"), ids::lpF, fmtFreq, ids::lpOn);
+    addSlider(pc, RU("КРУТИЗНА"), ids::slope, [](float v) { const int i = juce::roundToInt(v); return juce::String(12 * (1 << juce::jlimit(0, 2, i))) + "dB"; });
+
+    auto* ph = addPanel(RU("ПОДСКАЗКИ"), col::frameViolet, cx[2], py + Panel::heightFor(3) + 14, 4);
+    ph->setLines({ RU("2 КЛИКА ПО ЭКРАНУ: НОВАЯ ТОЧКА"),
+                   RU("КЛИК ПО ТОЧКЕ: МЕНЮ ТИПА"),
+                   RU("КОЛЕСО: ШИРИНА  SHIFT: ПОРОГ"),
+                   RU("2 КЛИКА ПО ТОЧКЕ: УДАЛИТЬ"),
+                   RU("НИЗ/ВЕРХ: КВАДРАТЫ ВНИЗУ ЭКРАНА") });
 
     addAndMakeVisible(weather);
     weather.setBounds(20, kH - 96 - 30, 1150, 96);
-    applySelection({ EqDisplay::Type::Graphic, 5 });
+    applySelection({});
 
     for (auto& pnl : panels) pnl->syncAll();
     startTimerHz(15);
@@ -225,18 +224,26 @@ void PepelEQEditor::applySelection(EqDisplay::Sel s)
 {
     using T = EqDisplay::Type;
     auto P = [this](const juce::String& id) { return proc.apvts.getParameter(id); };
-    juce::RangedAudioParameter* p0 = nullptr; juce::RangedAudioParameter* p1 = nullptr; juce::RangedAudioParameter* p2 = nullptr;
-    juce::String n1 = RU("УРОВЕНЬ"); std::function<juce::String(float)> f1 = fmtDb;
+    juce::RangedAudioParameter *p0 = nullptr, *p1 = nullptr, *p2 = nullptr, *p3 = nullptr;
     switch (s.type)
     {
-        case T::Graphic: p1 = P(ids::gain(s.idx)); break;
-        case T::Dyn:     p0 = P(ids::dFreq(s.idx)); p1 = P(ids::dRng(s.idx)); p2 = P(ids::dThr(s.idx)); n1 = RU("ЭФФЕКТ"); break;
-        case T::Notch:   p0 = P(ids::nFreq(s.idx)); p1 = P(ids::nDepth); n1 = RU("ГЛУБИНА");
-                         f1 = [](float v) { return juce::String(juce::roundToInt(v)) + "dB"; }; break;
-        case T::Sub:     p0 = P(ids::subFreq); break;
+        case T::Point: p0 = P(ids::pF(s.idx)); p1 = P(ids::pG(s.idx)); p2 = P(ids::pQ(s.idx)); p3 = P(ids::pThr(s.idx)); break;
+        case T::HP:    p0 = P(ids::hpF); break;
+        case T::LP:    p0 = P(ids::lpF); break;
         default: break;
     }
     pointRows[0]->setTarget(p0, RU("ЧАСТОТА"), fmtFreq);
-    pointRows[1]->setTarget(p1, n1, f1);
-    pointRows[2]->setTarget(p2, RU("ПОРОГ"), fmtThr);
+    pointRows[1]->setTarget(p1, RU("УСИЛЕНИЕ"), fmtDb);
+    pointRows[2]->setTarget(p2, RU("ШИРИНА"), fmtQ);
+    pointRows[3]->setTarget(p3, RU("ПОРОГ"), fmtThr);
+}
+
+Row* PepelEQEditor::addButton(Panel* p, const juce::String& name, std::function<bool()> on,
+                              std::function<juce::String()> text, std::function<void()> click)
+{
+    auto r = std::make_unique<Row>(Row::Kind::Button, name);
+    r->isOn = std::move(on);
+    r->btnText = std::move(text);
+    r->onClick = std::move(click);
+    return p->add(std::move(r));
 }
