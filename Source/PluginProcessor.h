@@ -2,28 +2,30 @@
 #include <JuceHeader.h>
 #include "Analyzer.h"
 
+constexpr int kPts = 8;   // точек, которые пользователь назначает сам
+
 namespace ids
 {
-    inline juce::String gain(int i)    { return "g" + juce::String(i); }
-    inline juce::String dFreq(int i)   { return "dF" + juce::String(i); }
-    inline juce::String dThr(int i)    { return "dT" + juce::String(i); }
-    inline juce::String dRng(int i)    { return "dR" + juce::String(i); }
-    inline juce::String nOn(int i)     { return "nO" + juce::String(i); }
-    inline juce::String nFreq(int i)   { return "nF" + juce::String(i); }
-    inline const char* subOn = "subOn";
-    inline const char* subFreq = "subF";
-    inline const char* dynQ = "dynQ";
+    inline juce::String pOn(int i)    { return "pOn" + juce::String(i); }
+    inline juce::String pF(int i)     { return "pF" + juce::String(i); }
+    inline juce::String pG(int i)     { return "pG" + juce::String(i); }
+    inline juce::String pQ(int i)     { return "pQ" + juce::String(i); }
+    inline juce::String pNotch(int i) { return "pNt" + juce::String(i); }
+    inline juce::String pDyn(int i)   { return "pDy" + juce::String(i); }
+    inline juce::String pThr(int i)   { return "pTh" + juce::String(i); }
+    inline const char* hpOn = "hpOn";
+    inline const char* hpF = "hpF";
+    inline const char* lpOn = "lpOn";
+    inline const char* lpF = "lpF";
+    inline const char* slope = "slope";
     inline const char* dynAtk = "dynA";
     inline const char* dynRel = "dynR";
     inline const char* scOn = "scOn";
-    inline const char* nDepth = "nDepth";
     inline const char* outGain = "out";
 }
 
-constexpr int kGraphic = 10;
-constexpr int kDyn = 4;
-constexpr int kNotch = 4;
-inline constexpr float kGraphicFreqs[kGraphic] = { 31.5f, 63.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f, 16000.f };
+// код прослушивания: 0..kPts-1 точки, 100 = что убирает срез низа, 101 = что убирает срез верха, -1 = выкл
+constexpr int kListenHP = 100, kListenLP = 101;
 
 class PepelEQAudioProcessor : public juce::AudioProcessor
 {
@@ -52,16 +54,18 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // добавить режекторный фильтр на частоту (кнопка "убрать" из поиска шума)
-    void addNotchAt(float freqHz);
-
     juce::AudioProcessorValueTreeState apvts;
     Analyzer inAnalyzer, outAnalyzer;
+
     // осциллограмма выхода (пик за 25 мс), для нижней плашки
     static constexpr int kScope = 190;
     std::array<std::atomic<float>, kScope> scope;
     std::atomic<int> scopeHead { 0 };
-    std::atomic<float> dynGainOut[kDyn] = {};   // текущее усиление динамических точек (для кривой)
+
+    std::atomic<float> dynGainOut[kPts] = {};   // текущее усиление динамических точек
+    std::atomic<int> listen { -1 };             // что слушаем соло
+    std::atomic<float> scLevel { 0.0f };        // уровень сигнала на входе сайдчейна (линейный пик)
+    std::atomic<bool> scBusOn { false };        // вход сайдчейна включён хостом
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -85,25 +89,24 @@ private:
         }
         void setPeaking(double sr, double f, double q, double gainDb);
         void setHighpass(double sr, double f, double q);
+        void setLowpass(double sr, double f, double q);
         void setBandpass(double sr, double f, double q);
     };
 
     double sampleRate = 44100.0;
     int currentProgram = 0;
 
-    Biquad sub[2], graphic[kGraphic], dyn[kDyn], det[kDyn], notch[kNotch];
-    float lastGraphic[kGraphic], dynGain[kDyn], dynLastApplied[kDyn], dynEnv[kDyn];
-    float lastSubFreq = -1.0f, lastNotchF[kNotch], lastNotchOn[kNotch], lastNotchDepth = -1.0f;
-    float lastDynF[kDyn], lastDynQ = -1.0f;
+    static constexpr int kMaxStages = 4;
+    Biquad pt[kPts], det[kPts], hp[kMaxStages], lp[kMaxStages], lb[2];
+    float ptLastG[kPts], ptLastF[kPts], ptLastQ[kPts];
+    float dynGain[kPts], dynEnv[kPts];
+    float lastHpF = -1, lastLpF = -1, lastSlope = -1, lastLbF = -1, lastLbQ = -1;
     float outGainSmoothed = 1.0f;
-    int notchRotate = 0;
 
-    std::atomic<float>* pGain[kGraphic];
-    std::atomic<float>* pDF[kDyn]; std::atomic<float>* pDT[kDyn]; std::atomic<float>* pDR[kDyn];
-    std::atomic<float>* pNO[kNotch]; std::atomic<float>* pNF[kNotch];
-    std::atomic<float> *pSubOn, *pSubF, *pDynQ, *pDynA, *pDynR, *pScOn, *pNDepth, *pOut;
+    std::atomic<float>* pOnP[kPts]; std::atomic<float>* pFP[kPts]; std::atomic<float>* pGP[kPts];
+    std::atomic<float>* pQP[kPts]; std::atomic<float>* pNP[kPts]; std::atomic<float>* pDP[kPts]; std::atomic<float>* pTP[kPts];
+    std::atomic<float> *pHpOn, *pHpF, *pLpOn, *pLpF, *pSlope, *pAtk, *pRel, *pSc, *pOut;
 
-    juce::AudioBuffer<float> scratch;
     float scopeAcc = 0.0f;
     int scopeCount = 0, scopeSlice = 1100;
 
