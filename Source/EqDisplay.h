@@ -6,20 +6,20 @@
 
 namespace pepel
 {
-// Большой экран в духе Pro-Q: спектр до/после, кривая EQ, узлы, которые таскаются мышью.
-//  - 10 узлов графического EQ: тянуть вверх/вниз (частота фиксирована), двойной клик: сброс
-//  - 4 динамические точки: тянуть по X (частота) и Y (эффект), колесо: порог, двойной клик: убрать
-//  - двойной клик по пустому месту: новая динамическая точка
-//  - режекторы: тянуть по X (частота) и Y (глубина), двойной клик: выключить
-//  - квадрат внизу: срез саба, тянуть по X, двойной клик: вкл/выкл
-//  - треугольники сверху: найденный шум, клик ставит режектор
+// Экран в духе Pro-Q: спектр до/после, кривая EQ и точки, которые пользователь создаёт сам.
+//  - двойной клик по пустому месту: новая точка
+//  - клик по точке: меню (колокол / режектор, динамическая, прослушать, удалить)
+//  - тянуть точку: частота (X) и усиление (Y); колесо: ширина; Shift+колесо: порог динамики
+//  - двойной клик по точке: удалить
+//  - квадраты внизу: срез низа (HP) и верха (LP), тянуть по X, двойной клик: вкл/выкл
 class EqDisplay : public juce::Component
 {
 public:
-    enum class Type { None, Graphic, Dyn, Notch, Sub };
+    enum class Type { None, Point, HP, LP };
     struct Sel { Type type = Type::None; int idx = 0; };
 
     std::function<void(Sel)> onSelect;
+    Sel selected;
 
     explicit EqDisplay(PepelEQAudioProcessor& p) : proc(p)
     {
@@ -27,10 +27,14 @@ public:
         for (auto& v : specOut) v = -120.0f;
     }
 
-    Sel selected;
+    static int listenCodeOf(Sel s)
+    {
+        return s.type == Type::Point ? s.idx : (s.type == Type::HP ? kListenHP : (s.type == Type::LP ? kListenLP : -1));
+    }
 
     void tick()
     {
+        ++frame;
         for (int i = 0; i < Analyzer::numSpec; ++i)
         {
             const float a = proc.inAnalyzer.spec[(size_t) i].load();
@@ -41,17 +45,22 @@ public:
         repaint();
     }
 
+    void deleteSelected()
+    {
+        if (selected.type == Type::Point) removePoint(selected.idx);
+        else if (selected.type == Type::HP) setBool(ids::hpOn, false);
+        else if (selected.type == Type::LP) setBool(ids::lpOn, false);
+        if (selected.type == Type::Point) { selected = {}; if (onSelect) onSelect(selected); }
+    }
+
     // ---------------- рисование ----------------
     void paint(juce::Graphics& g) override
     {
-        const auto b = getLocalBounds();
-        drawPanelFrame(g, b, col::frameViolet);
+        drawPanelFrame(g, getLocalBounds(), col::frameViolet);
         const auto pl = plot();
-
         g.setColour(hex(0x090A3C));
         g.fillRect(pl);
 
-        // сетка
         const float fm[] = { 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
                              2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000 };
         for (float f : fm)
@@ -60,13 +69,16 @@ public:
             g.setColour((major ? col::indigo : col::night).withAlpha(major ? 1.0f : 0.8f));
             g.fillRect(xOf(f), pl.getY(), 1, pl.getHeight());
         }
-        for (int db = -18; db <= 18; db += 6)
+        for (int db = -24; db <= 24; db += 6)
         {
             g.setColour(db == 0 ? col::mist : col::indigo);
             g.fillRect(pl.getX(), yOfDb((float) db), pl.getWidth(), db == 0 ? 2 : 1);
-            g.setColour(col::mist);
-            g.setFont(Fonts::get().vt323(18.0f));
-            g.drawText((db > 0 ? "+" : "") + juce::String(db), 4, yOfDb((float) db) - 8, 42, 16, juce::Justification::centredRight, false);
+            if (db % 12 == 0)
+            {
+                g.setColour(col::mist);
+                g.setFont(Fonts::get().vt323(18.0f));
+                g.drawText((db > 0 ? "+" : "") + juce::String(db), 4, yOfDb((float) db) - 8, 42, 16, juce::Justification::centredRight, false);
+            }
         }
         g.setColour(col::mist);
         g.setFont(Fonts::get().vt323(18.0f));
@@ -78,7 +90,7 @@ public:
         g.saveState();
         g.reduceClipRegion(pl);
 
-        // спектр: до (заливка) и после (линия)
+        // спектр
         for (int x = pl.getX(); x < pl.getRight(); x += 4)
         {
             const float f = fOf((float) x + 2.0f);
@@ -100,6 +112,9 @@ public:
             g.fillRect(x, yOut, 3, 2);
         }
 
+        // подсветка прослушиваемого
+        drawListenOverlay(g);
+
         // кривая EQ
         std::vector<float> curve;
         computeCurve(curve);
@@ -118,51 +133,37 @@ public:
         }
         g.restoreState();
 
-        // найденный шум: треугольники сверху
-        const int nf = proc.inAnalyzer.foundCount.load();
-        for (int i = 0; i < nf; ++i)
-        {
-            const float f = proc.inAnalyzer.foundFreq[(size_t) i].load();
-            const int x = xOf(f);
-            g.setColour(col::peach);
-            for (int r = 0; r < 4; ++r) g.fillRect(x - 6 + r * 2, pl.getY() + 2 + r * 3, 12 - r * 4, 3);
-            g.setColour(col::ink);
-            g.fillRect(x - 1, pl.getY() + 14, 2, 4);
-        }
-
-        // узлы
         drawNodes(g);
 
-        // подсказка / значения
         g.setColour(col::textSoft);
         g.setFont(Fonts::get().vt323(22.0f));
-        g.drawText(readout(), pl.getX() + 8, pl.getY() + 20, 520, 22, juce::Justification::centredLeft, false);
-        g.setColour(col::mist);
-        g.setFont(Fonts::get().press(8.0f));
-        g.drawText(RU("2 КЛИКА НА ПУСТОМ МЕСТЕ: ДИН. ТОЧКА   КОЛЕСО НА ДИН. ТОЧКЕ: ПОРОГ"),
-                   pl.getX() + 8, pl.getBottom() - 16, pl.getWidth() - 16, 12, juce::Justification::centredRight, false);
+        g.drawText(readout(), pl.getX() + 8, pl.getY() + 4, 560, 22, juce::Justification::centredLeft, false);
+
+        const int lc = proc.listen.load();
+        if (lc >= 0 && ((frame / 4) % 2 == 0))
+        {
+            g.setColour(col::blood);
+            g.fillRect(pl.getRight() - 150, pl.getY() + 8, 10, 10);
+            g.setColour(col::moon);
+            g.setFont(Fonts::get().vt323(22.0f));
+            g.drawText("LISTEN", pl.getRight() - 134, pl.getY() + 3, 130, 22, juce::Justification::centredLeft, false);
+        }
+        if (!anyPoint())
+        {
+            g.setColour(col::glow.withAlpha(0.8f));
+            g.setFont(Fonts::get().press(10.0f));
+            g.drawText(RU("ДВОЙНОЙ КЛИК: СОЗДАТЬ ТОЧКУ"), pl, juce::Justification::centred, false);
+        }
     }
 
     // ---------------- мышь ----------------
     void mouseDown(const juce::MouseEvent& e) override
     {
-        grabbed = false;
-        // найденный шум
-        const auto pl = plot();
-        const int nf = proc.inAnalyzer.foundCount.load();
-        for (int i = 0; i < nf; ++i)
-        {
-            const int x = xOf(proc.inAnalyzer.foundFreq[(size_t) i].load());
-            if (std::abs(e.x - x) < 9 && e.y < pl.getY() + 22 && hitNode(e.getPosition(), 12).type == Type::None)
-            {
-                proc.addNotchAt(proc.inAnalyzer.foundFreq[(size_t) i].load());
-                return;
-            }
-        }
+        grabbed = false; moved = false;
         const auto h = hitNode(e.getPosition(), 14);
         if (h.type == Type::None)
         {
-            if (e.getNumberOfClicks() >= 2 && pl.contains(e.getPosition())) addDynAt(e.getPosition());
+            if (e.getNumberOfClicks() >= 2 && plot().contains(e.getPosition())) addPointAt(e.getPosition());
             return;
         }
         selected = h;
@@ -170,12 +171,13 @@ public:
 
         if (e.getNumberOfClicks() >= 2)
         {
-            doubleClickNode(h);
+            deleteSelectedNode(h);
             return;
         }
         touched = paramsFor(h);
         for (auto* p : touched) p->beginChangeGesture();
         grabbed = true;
+        downPos = e.getPosition();
         const auto pos = nodePos(h);
         grabDx = pos.x - e.x; grabDy = pos.y - e.y;
     }
@@ -183,45 +185,69 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override
     {
         if (!grabbed) return;
+        if (!moved && e.getPosition().getDistanceFrom(downPos) < 4) return;
+        moved = true;
         const int x = e.x + grabDx, y = e.y + grabDy;
         const float f = juce::jlimit(20.0f, 20000.0f, fOf((float) x));
         const float db = dbOfY(y);
         switch (selected.type)
         {
-            case Type::Graphic: setReal(ids::gain(selected.idx), juce::jlimit(-12.0f, 12.0f, db)); break;
-            case Type::Dyn:     setReal(ids::dFreq(selected.idx), juce::jlimit(40.0f, 16000.0f, f));
-                                setReal(ids::dRng(selected.idx), juce::jlimit(-18.0f, 18.0f, std::abs(db) < 0.5f ? (db < 0 ? -0.5f : 0.5f) : db)); break;
-            case Type::Notch:   setReal(ids::nFreq(selected.idx), f);
-                                setReal(ids::nDepth, juce::jlimit(6.0f, 36.0f, -db)); break;
-            case Type::Sub:     setReal(ids::subFreq, juce::jlimit(20.0f, 60.0f, f)); break;
+            case Type::Point:
+            {
+                const bool notch = boolP(ids::pNotch(selected.idx));
+                setReal(ids::pF(selected.idx), f);
+                setReal(ids::pG(selected.idx), juce::jlimit(-24.0f, notch ? 0.0f : 24.0f, db));
+                break;
+            }
+            case Type::HP: setReal(ids::hpF, f); setReal(ids::hpOn, 1.0f); break;
+            case Type::LP: setReal(ids::lpF, f); setReal(ids::lpOn, 1.0f); break;
             default: break;
         }
     }
 
-    void mouseUp(const juce::MouseEvent&) override
+    void mouseUp(const juce::MouseEvent& e) override
     {
+        const bool wasClick = grabbed && !moved;
         if (grabbed) for (auto* p : touched) p->endChangeGesture();
         grabbed = false; touched.clear();
+        if (wasClick && e.getNumberOfClicks() < 2) showMenu();
     }
 
-    void mouseMove(const juce::MouseEvent& e) override
-    {
-        const auto h = hitNode(e.getPosition(), 14);
-        if (h.type != hover.type || h.idx != hover.idx) { hover = h; }
-    }
+    void mouseMove(const juce::MouseEvent& e) override { hover = hitNode(e.getPosition(), 14); }
     void mouseExit(const juce::MouseEvent&) override { hover = {}; }
 
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         const auto h = hitNode(e.getPosition(), 18);
-        if (h.type != Type::Dyn) return;
-        auto* p = proc.apvts.getParameter(ids::dThr(h.idx));
-        const float cur = p->convertFrom0to1(p->getValue());
-        p->beginChangeGesture();
-        p->setValueNotifyingHost(p->convertTo0to1(juce::jlimit(-70.0f, 0.0f, cur + (w.deltaY > 0 ? 1.0f : -1.0f))));
-        p->endChangeGesture();
+        if (h.type != Type::Point) return;
+        const float d = w.deltaY != 0.0f ? w.deltaY : w.deltaX;
+        if (d == 0.0f) return;
+        if (e.mods.isShiftDown())
+        {
+            if (!boolP(ids::pDyn(h.idx))) return;
+            auto* p = proc.apvts.getParameter(ids::pThr(h.idx));
+            const float cur = p->convertFrom0to1(p->getValue());
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(juce::jlimit(-70.0f, 0.0f, cur + (d > 0 ? 1.0f : -1.0f))));
+            p->endChangeGesture();
+        }
+        else
+        {
+            auto* p = proc.apvts.getParameter(ids::pQ(h.idx));
+            const float cur = p->convertFrom0to1(p->getValue());
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(juce::jlimit(0.3f, 40.0f, cur * (d > 0 ? 0.88f : 1.14f))));
+            p->endChangeGesture();
+        }
         selected = h;
         if (onSelect) onSelect(selected);
+    }
+
+    // команда из панели «ТОЧКА» (те же пункты, что в меню)
+    void command(int id)
+    {
+        if (id == 5) { deleteSelected(); return; }
+        applyMenu(selected, id);
     }
 
 private:
@@ -240,12 +266,12 @@ private:
     int yOfDb(float db) const
     {
         const auto pl = plot();
-        return pl.getY() + (int) ((18.0f - juce::jlimit(-18.0f, 18.0f, db)) / 36.0f * (float) pl.getHeight());
+        return pl.getY() + (int) ((24.0f - juce::jlimit(-24.0f, 24.0f, db)) / 48.0f * (float) pl.getHeight());
     }
     float dbOfY(int y) const
     {
         const auto pl = plot();
-        return 18.0f - ((float) (y - pl.getY()) / (float) pl.getHeight()) * 36.0f;
+        return 24.0f - ((float) (y - pl.getY()) / (float) pl.getHeight()) * 48.0f;
     }
 
     // ---------- параметры ----------
@@ -260,16 +286,30 @@ private:
         p->setValueNotifyingHost(p->convertTo0to1(v));
     }
     bool boolP(const juce::String& id) const { return proc.apvts.getParameter(id)->getValue() > 0.5f; }
+    void setBool(const juce::String& id, bool on)
+    {
+        auto* p = proc.apvts.getParameter(id);
+        p->beginChangeGesture(); p->setValueNotifyingHost(on ? 1.0f : 0.0f); p->endChangeGesture();
+    }
+    void putReal(const juce::String& id, float v)
+    {
+        auto* p = proc.apvts.getParameter(id);
+        p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1(v)); p->endChangeGesture();
+    }
+    bool anyPoint() const
+    {
+        for (int i = 0; i < kPts; ++i) if (boolP(ids::pOn(i))) return true;
+        return boolP(ids::hpOn) || boolP(ids::lpOn);
+    }
 
     std::vector<juce::RangedAudioParameter*> paramsFor(Sel s) const
     {
         auto g = [this](const juce::String& id) { return proc.apvts.getParameter(id); };
         switch (s.type)
         {
-            case Type::Graphic: return { g(ids::gain(s.idx)) };
-            case Type::Dyn:     return { g(ids::dFreq(s.idx)), g(ids::dRng(s.idx)) };
-            case Type::Notch:   return { g(ids::nFreq(s.idx)), g(ids::nDepth) };
-            case Type::Sub:     return { g(ids::subFreq) };
+            case Type::Point: return { g(ids::pF(s.idx)), g(ids::pG(s.idx)) };
+            case Type::HP:    return { g(ids::hpF), g(ids::hpOn) };
+            case Type::LP:    return { g(ids::lpF), g(ids::lpOn) };
             default: return {};
         }
     }
@@ -279,20 +319,10 @@ private:
         const auto pl = plot();
         switch (s.type)
         {
-            case Type::Graphic: return { xOf(kGraphicFreqs[s.idx]), yOfDb(real(ids::gain(s.idx))) };
-            case Type::Dyn:     return { xOf(real(ids::dFreq(s.idx))), yOfDb(real(ids::dRng(s.idx))) };
-            case Type::Notch:   return { xOf(real(ids::nFreq(s.idx))), yOfDb(-real(ids::nDepth)) };
-            case Type::Sub:     return { xOf(real(ids::subFreq)), pl.getBottom() - 10 };
+            case Type::Point: return { xOf(real(ids::pF(s.idx))), yOfDb(real(ids::pG(s.idx))) };
+            case Type::HP:    return { xOf(real(ids::hpF)), pl.getBottom() - 14 };
+            case Type::LP:    return { xOf(real(ids::lpF)), pl.getBottom() - 38 };
             default: return {};
-        }
-    }
-    bool nodeVisible(Sel s) const
-    {
-        switch (s.type)
-        {
-            case Type::Dyn:   return std::abs(real(ids::dRng(s.idx))) >= 0.05f;
-            case Type::Notch: return boolP(ids::nOn(s.idx));
-            default: return true;
         }
     }
 
@@ -303,57 +333,116 @@ private:
             for (int i = 0; i < n; ++i)
             {
                 Sel s { t, i };
-                if (!nodeVisible(s)) continue;
+                if (t == Type::Point && !boolP(ids::pOn(i))) continue;
                 const auto p = nodePos(s);
                 const int d = (p.x - m.x) * (p.x - m.x) + (p.y - m.y) * (p.y - m.y);
                 if (d < bestD) { bestD = d; best = s; }
             }
         };
-        test(Type::Dyn, kDyn); test(Type::Notch, kNotch); test(Type::Graphic, kGraphic); test(Type::Sub, 1);
+        test(Type::Point, kPts); test(Type::HP, 1); test(Type::LP, 1);
         return best;
     }
 
-    void doubleClickNode(Sel s)
+    void removePoint(int i)
     {
-        auto reset = [this](const juce::String& id) {
-            auto* p = proc.apvts.getParameter(id);
-            p->beginChangeGesture(); p->setValueNotifyingHost(p->getDefaultValue()); p->endChangeGesture();
-        };
-        auto setBool = [this](const juce::String& id, bool on) {
-            auto* p = proc.apvts.getParameter(id);
-            p->beginChangeGesture(); p->setValueNotifyingHost(on ? 1.0f : 0.0f); p->endChangeGesture();
-        };
-        switch (s.type)
-        {
-            case Type::Graphic: reset(ids::gain(s.idx)); break;
-            case Type::Dyn:     reset(ids::dRng(s.idx)); break;
-            case Type::Notch:   setBool(ids::nOn(s.idx), false); break;
-            case Type::Sub:     setBool(ids::subOn, !boolP(ids::subOn)); break;
-            default: break;
-        }
+        setBool(ids::pOn(i), false);
+        if (proc.listen.load() == i) proc.listen.store(-1);
     }
 
-    void addDynAt(juce::Point<int> m)
+    void deleteSelectedNode(Sel h)
     {
-        for (int j = 0; j < kDyn; ++j)
-            if (std::abs(real(ids::dRng(j))) < 0.05f)
+        if (h.type == Type::Point) { removePoint(h.idx); selected = {}; if (onSelect) onSelect(selected); }
+        else if (h.type == Type::HP) { setBool(ids::hpOn, !boolP(ids::hpOn)); }
+        else if (h.type == Type::LP) { setBool(ids::lpOn, !boolP(ids::lpOn)); }
+    }
+
+    void addPointAt(juce::Point<int> m)
+    {
+        for (int j = 0; j < kPts; ++j)
+            if (!boolP(ids::pOn(j)))
             {
-                const float db = dbOfY(m.y);
-                const float rng = std::abs(db) < 3.0f ? (db < 0 ? -4.0f : 4.0f) : juce::jlimit(-18.0f, 18.0f, db);
-                auto put = [this](const juce::String& id, float v) {
-                    auto* p = proc.apvts.getParameter(id);
-                    p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1(v)); p->endChangeGesture();
-                };
-                put(ids::dFreq(j), juce::jlimit(40.0f, 16000.0f, fOf((float) m.x)));
-                put(ids::dThr(j), -30.0f);
-                put(ids::dRng(j), rng);
-                selected = { Type::Dyn, j };
+                putReal(ids::pF(j), juce::jlimit(20.0f, 20000.0f, fOf((float) m.x)));
+                putReal(ids::pG(j), juce::jlimit(-24.0f, 24.0f, dbOfY(m.y)));
+                putReal(ids::pQ(j), 1.4f);
+                putReal(ids::pThr(j), -30.0f);
+                setBool(ids::pNotch(j), false);
+                setBool(ids::pDyn(j), false);
+                setBool(ids::pOn(j), true);
+                selected = { Type::Point, j };
                 if (onSelect) onSelect(selected);
                 return;
             }
     }
 
+    void showMenu()
+    {
+        const Sel s = selected;
+        if (s.type == Type::None) return;
+        juce::PopupMenu m;
+        if (s.type == Type::Point)
+        {
+            m.addItem(1, RU("Колокол"), true, !boolP(ids::pNotch(s.idx)));
+            m.addItem(2, RU("Режектор (только срез)"), true, boolP(ids::pNotch(s.idx)));
+            m.addSeparator();
+            m.addItem(3, RU("Динамическая"), true, boolP(ids::pDyn(s.idx)));
+            m.addItem(4, RU("Прослушать эту точку"), true, proc.listen.load() == s.idx);
+            m.addSeparator();
+            m.addItem(5, RU("Удалить"));
+        }
+        else
+        {
+            const bool on = s.type == Type::HP ? boolP(ids::hpOn) : boolP(ids::lpOn);
+            m.addItem(1, on ? RU("Выключить срез") : RU("Включить срез"));
+            m.addItem(4, RU("Прослушать то, что срезается"), on, proc.listen.load() == listenCodeOf(s));
+        }
+        juce::Component::SafePointer<EqDisplay> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, s](int r) {
+            if (safe == nullptr || r == 0) return;
+            safe->applyMenu(s, r);
+        });
+    }
+
+    void applyMenu(Sel s, int r)
+    {
+        if (s.type == Type::Point)
+        {
+            const int i = s.idx;
+            if (r == 1 || r == 2)
+            {
+                const bool notch = (r == 2);
+                setBool(ids::pNotch(i), notch);
+                if (notch)
+                {
+                    if (real(ids::pG(i)) > -3.0f) putReal(ids::pG(i), -18.0f);
+                    if (real(ids::pQ(i)) < 4.0f) putReal(ids::pQ(i), 10.0f);
+                }
+                else if (real(ids::pQ(i)) > 6.0f) putReal(ids::pQ(i), 1.4f);
+            }
+            else if (r == 3)
+            {
+                const bool on = !boolP(ids::pDyn(i));
+                setBool(ids::pDyn(i), on);
+                if (on && std::abs(real(ids::pG(i))) < 2.0f) putReal(ids::pG(i), -6.0f);
+            }
+            else if (r == 4) proc.listen.store(proc.listen.load() == i ? -1 : i);
+            else if (r == 5) { removePoint(i); selected = {}; if (onSelect) onSelect(selected); }
+        }
+        else
+        {
+            const bool hp = s.type == Type::HP;
+            if (r == 1) setBool(hp ? ids::hpOn : ids::lpOn, !boolP(hp ? ids::hpOn : ids::lpOn));
+            else if (r == 4) proc.listen.store(proc.listen.load() == listenCodeOf(s) ? -1 : listenCodeOf(s));
+        }
+    }
+
     // ---------- кривая ----------
+    static std::vector<float> stageQs(int slopeIdx)
+    {
+        static const float q[3][4] = { { 0.7071f, 0, 0, 0 }, { 0.5412f, 1.3066f, 0, 0 }, { 0.5098f, 0.6013f, 0.8999f, 2.5629f } };
+        const int n = slopeIdx == 0 ? 1 : (slopeIdx == 1 ? 2 : 4);
+        return std::vector<float>(q[slopeIdx], q[slopeIdx] + n);
+    }
+
     void computeCurve(std::vector<float>& out) const
     {
         const auto pl = plot();
@@ -363,27 +452,19 @@ private:
 
         using Co = juce::dsp::IIR::Coefficients<float>;
         std::vector<Co::Ptr> cs;
-        for (int i = 0; i < kGraphic; ++i)
+        for (int i = 0; i < kPts; ++i)
         {
-            const float g = real(ids::gain(i));
-            if (std::abs(g) >= 0.01f) cs.push_back(Co::makePeakFilter(sr, kGraphicFreqs[i], 1.4f, juce::Decibels::decibelsToGain(g)));
+            if (!boolP(ids::pOn(i))) continue;
+            float g = real(ids::pG(i));
+            if (boolP(ids::pNotch(i))) g = juce::jmin(g, 0.0f);
+            if (boolP(ids::pDyn(i))) g = proc.dynGainOut[i].load();
+            if (std::abs(g) >= 0.01f)
+                cs.push_back(Co::makePeakFilter(sr, real(ids::pF(i)), real(ids::pQ(i)), juce::Decibels::decibelsToGain(g)));
         }
-        const float q = real(ids::dynQ);
-        for (int j = 0; j < kDyn; ++j)
-            if (std::abs(real(ids::dRng(j))) >= 0.05f)
-            {
-                const float g = proc.dynGainOut[j].load();
-                if (std::abs(g) >= 0.01f) cs.push_back(Co::makePeakFilter(sr, real(ids::dFreq(j)), q, juce::Decibels::decibelsToGain(g)));
-            }
-        const float depth = real(ids::nDepth);
-        for (int k = 0; k < kNotch; ++k)
-            if (boolP(ids::nOn(k)))
-                cs.push_back(Co::makePeakFilter(sr, real(ids::nFreq(k)), 12.0f, juce::Decibels::decibelsToGain(-depth)));
-        if (boolP(ids::subOn))
-        {
-            cs.push_back(Co::makeHighPass(sr, real(ids::subFreq), 0.5412f));
-            cs.push_back(Co::makeHighPass(sr, real(ids::subFreq), 1.3066f));
-        }
+        const auto qs = stageQs(juce::jlimit(0, 2, (int) std::lround(real(ids::slope))));
+        if (boolP(ids::hpOn)) for (float q : qs) cs.push_back(Co::makeHighPass(sr, real(ids::hpF), q));
+        if (boolP(ids::lpOn)) for (float q : qs) cs.push_back(Co::makeLowPass(sr, real(ids::lpF), q));
+
         for (int i = 0; i < n; ++i)
         {
             const double f = juce::jmin((double) fOf((float) (pl.getX() + i * 3 + 1)), sr * 0.49);
@@ -393,47 +474,74 @@ private:
         }
     }
 
+    void drawListenOverlay(juce::Graphics& g) const
+    {
+        const int lc = proc.listen.load();
+        if (lc < 0) return;
+        const auto pl = plot();
+        g.setColour(col::peach.withAlpha(0.28f));
+        if (lc < kPts)
+        {
+            const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
+            auto bp = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, real(ids::pF(lc)), juce::jmax(0.5f, real(ids::pQ(lc))));
+            for (int x = pl.getX(); x < pl.getRight(); x += 3)
+            {
+                const double f = juce::jmin((double) fOf((float) x + 1.0f), sr * 0.49);
+                const double m = bp->getMagnitudeForFrequency(f, sr);
+                const int h = (int) (juce::jmin(1.0, m * m * 1.6) * pl.getHeight());
+                g.fillRect(x, pl.getBottom() - h, 3, h);
+            }
+        }
+        else if (lc == kListenHP) g.fillRect(pl.getX(), pl.getY(), xOf(real(ids::hpF)) - pl.getX(), pl.getHeight());
+        else if (lc == kListenLP) g.fillRect(xOf(real(ids::lpF)), pl.getY(), pl.getRight() - xOf(real(ids::lpF)), pl.getHeight());
+    }
+
     // ---------- узлы ----------
     void drawNodes(juce::Graphics& g)
     {
-        auto isSel = [this](Type t, int i) { return selected.type == t && selected.idx == i; };
-        auto isHov = [this](Type t, int i) { return hover.type == t && hover.idx == i; };
-
-        for (int i = 0; i < kGraphic; ++i)
+        static const char* diamond[] = { "...#...", "..###..", ".#####.", "#######", ".#####.", "..###..", "...#..." };
+        const int lc = proc.listen.load();
+        for (int i = 0; i < kPts; ++i)
         {
-            const auto p = nodePos({ Type::Graphic, i });
-            const int r = (isSel(Type::Graphic, i) || isHov(Type::Graphic, i)) ? 7 : 5;
-            g.setColour(col::ink); g.fillRect(p.x - r - 2, p.y - r - 2, 2 * r + 4, 2 * r + 4);
-            g.setColour(col::starBlue); g.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
-            g.setColour(col::moon); g.fillRect(p.x - 2, p.y - 2, 4, 4);
-        }
-        for (int j = 0; j < kDyn; ++j)
-        {
-            if (!nodeVisible({ Type::Dyn, j })) continue;
-            const auto p = nodePos({ Type::Dyn, j });
-            const int sc = (isSel(Type::Dyn, j) || isHov(Type::Dyn, j)) ? 3 : 2;
-            drawSprite(g, sprites::heart, sprites::heartW, sprites::heartH, p.x - 7 * sc / 2 + 1, p.y - 3 * sc + 2, sc, col::ink);
-            drawSprite(g, sprites::heart, sprites::heartW, sprites::heartH, p.x - 7 * sc / 2, p.y - 3 * sc, sc, col::blood);
+            if (!boolP(ids::pOn(i))) continue;
+            const bool sel = selected.type == Type::Point && selected.idx == i;
+            const bool hov = hover.type == Type::Point && hover.idx == i;
+            const bool notch = boolP(ids::pNotch(i)), dyn = boolP(ids::pDyn(i));
+            const auto p = nodePos({ Type::Point, i });
+            const int sc = (sel || hov) ? 3 : 2;
+            const juce::Colour c = lc == i ? col::peach : (notch ? col::peach : col::blood);
+            if (dyn)
+            {
+                g.setColour(col::glow);
+                g.drawRect(p.x - 11, p.y - 11, 22, 22, 2);
+            }
+            if (notch)
+            {
+                drawSprite(g, diamond, 7, 7, p.x - 7 * sc / 2 + 1, p.y - 7 * sc / 2 + 1, sc, col::ink);
+                drawSprite(g, diamond, 7, 7, p.x - 7 * sc / 2, p.y - 7 * sc / 2, sc, c);
+            }
+            else
+            {
+                drawSprite(g, sprites::heart, sprites::heartW, sprites::heartH, p.x - 7 * sc / 2 + 1, p.y - 3 * sc + 1, sc, col::ink);
+                drawSprite(g, sprites::heart, sprites::heartW, sprites::heartH, p.x - 7 * sc / 2, p.y - 3 * sc, sc, c);
+            }
             g.setColour(col::moon);
             g.setFont(Fonts::get().vt323(20.0f));
-            g.drawText(juce::String(j + 1), p.x - 10, p.y - 3 * sc - 18, 20, 16, juce::Justification::centred, false);
+            g.drawText((dyn ? "D" : "") + juce::String(i + 1), p.x - 14, p.y - 30, 28, 16, juce::Justification::centred, false);
         }
-        for (int k = 0; k < kNotch; ++k)
+        for (int k = 0; k < 2; ++k)
         {
-            if (!nodeVisible({ Type::Notch, k })) continue;
-            const auto p = nodePos({ Type::Notch, k });
-            const int r = (isSel(Type::Notch, k) || isHov(Type::Notch, k)) ? 7 : 5;
-            g.setColour(col::ink); g.fillRect(p.x - r - 2, p.y - r - 2, 2 * r + 4, 2 * r + 4);
-            g.setColour(col::peach);
-            g.fillRect(p.x - r, p.y - 2, 2 * r, 4); g.fillRect(p.x - 2, p.y - r, 4, 2 * r);
-        }
-        {
-            const auto p = nodePos({ Type::Sub, 0 });
-            const bool on = boolP(ids::subOn);
-            const int r = (isSel(Type::Sub, 0) || isHov(Type::Sub, 0)) ? 7 : 5;
+            const Type t = k == 0 ? Type::HP : Type::LP;
+            const bool on = boolP(k == 0 ? ids::hpOn : ids::lpOn);
+            const bool sel = selected.type == t, hov = hover.type == t;
+            const auto p = nodePos({ t, 0 });
+            const int r = (sel || hov) ? 8 : 6;
             g.setColour(col::ink); g.fillRect(p.x - r - 2, p.y - r - 2, 2 * r + 4, 2 * r + 4);
             g.setColour(on ? col::glow : col::mist); g.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
             g.setColour(on ? col::blood : col::track); g.fillRect(p.x - 2, p.y - 2, 4, 4);
+            g.setColour(on ? col::moon : col::mist);
+            g.setFont(Fonts::get().vt323(18.0f));
+            g.drawText(k == 0 ? "HP" : "LP", p.x - 16, p.y - r - 18, 32, 14, juce::Justification::centred, false);
         }
     }
 
@@ -445,21 +553,26 @@ private:
         const Sel s = (hover.type != Type::None) ? hover : selected;
         switch (s.type)
         {
-            case Type::Graphic: return "BAND " + fmtF(kGraphicFreqs[s.idx]) + "  " + fmtD(real(ids::gain(s.idx)));
-            case Type::Dyn:     return "DYN " + juce::String(s.idx + 1) + "  " + fmtF(real(ids::dFreq(s.idx))) + "  "
-                                       + fmtD(real(ids::dRng(s.idx))) + "  THR " + juce::String(juce::roundToInt(real(ids::dThr(s.idx)))) + "dB";
-            case Type::Notch:   return "NOTCH " + juce::String(s.idx + 1) + "  " + fmtF(real(ids::nFreq(s.idx))) + "  " + fmtD(-real(ids::nDepth));
-            case Type::Sub:     return String_sub();
+            case Type::Point:
+            {
+                if (!boolP(ids::pOn(s.idx))) return {};
+                juce::String t = (boolP(ids::pNotch(s.idx)) ? "NOTCH " : "BELL ") + juce::String(s.idx + 1) + "  " + fmtF(real(ids::pF(s.idx)))
+                                 + "  " + fmtD(real(ids::pG(s.idx))) + "  Q " + juce::String(real(ids::pQ(s.idx)), 1);
+                if (boolP(ids::pDyn(s.idx))) t += "  DYN THR " + juce::String(juce::roundToInt(real(ids::pThr(s.idx)))) + "dB";
+                return t;
+            }
+            case Type::HP: return "LOW CUT " + fmtF(real(ids::hpF)) + (boolP(ids::hpOn) ? "  ON" : "  OFF");
+            case Type::LP: return "HIGH CUT " + fmtF(real(ids::lpF)) + (boolP(ids::lpOn) ? "  ON" : "  OFF");
             default: return {};
         }
     }
-    juce::String String_sub() const { return "SUB CUT " + fmtF(real(ids::subFreq)) + (boolP(ids::subOn) ? "  ON" : "  OFF"); }
 
     PepelEQAudioProcessor& proc;
     float specIn[Analyzer::numSpec], specOut[Analyzer::numSpec];
     Sel hover;
-    bool grabbed = false;
-    int grabDx = 0, grabDy = 0;
+    bool grabbed = false, moved = false;
+    int grabDx = 0, grabDy = 0, frame = 0;
+    juce::Point<int> downPos;
     std::vector<juce::RangedAudioParameter*> touched;
 };
 } // namespace pepel
